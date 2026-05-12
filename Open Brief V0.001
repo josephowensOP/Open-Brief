@@ -1,0 +1,584 @@
+import { useState, useEffect, useCallback } from "react";
+
+const STORAGE_KEY = "open_briefs_v2";
+const EMPTY_BRAND = {
+  description: "", audience: "", messages: "",
+  fontDisplay: "", fontBody: "", fontNotes: "",
+  logoRules: "", ctaStyle: "", animRules: "",
+  guidelines: "", customPrompts: "", assetSummary: "",
+  colours: []
+};
+
+export default function App() {
+  const [db, setDb] = useState({ clients: {}, briefs: {} });
+  const [activeClient, setActiveClient] = useState(null);
+  const [view, setView] = useState("welcome");
+  const [brand, setBrand] = useState(EMPTY_BRAND);
+  const [showAddClient, setShowAddClient] = useState(false);
+  const [newClientName, setNewClientName] = useState("");
+  const [newClientCode, setNewClientCode] = useState("");
+  const [briefInput, setBriefInput] = useState("");
+  const [briefFormats, setBriefFormats] = useState("");
+  const [briefCampaign, setBriefCampaign] = useState("");
+  const [wantWireframe, setWantWireframe] = useState(true);
+  const [wantHistory, setWantHistory] = useState(true);
+  const [analysing, setAnalysing] = useState(false);
+  const [analysisStep, setAnalysisStep] = useState("");
+  const [result, setResult] = useState(null);
+  const [historySearch, setHistorySearch] = useState("");
+  const [saveMsg, setSaveMsg] = useState("");
+  const [colourHex, setColourHex] = useState("#E8622A");
+  const [colourLabel, setColourLabel] = useState("");
+  const [viewingBrief, setViewingBrief] = useState(null);
+  const [navExpanded, setNavExpanded] = useState(false);
+  const [briefTab, setBriefTab] = useState("brief");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get(STORAGE_KEY);
+        if (r) {
+          const saved = JSON.parse(r.value);
+          if (saved.db) setDb(saved.db);
+        }
+      } catch {}
+    })();
+  }, []);
+
+  const persist = useCallback(async (newDb) => {
+    try { await window.storage.set(STORAGE_KEY, JSON.stringify({ db: newDb })); } catch {}
+  }, []);
+
+  const clients = Object.values(db.clients).sort((a, b) => a.name.localeCompare(b.name));
+
+  const selectClient = (id) => {
+    setActiveClient(id);
+    setBrand(db.clients[id]?.brand || { ...EMPTY_BRAND });
+    setView("brand");
+    setResult(null);
+    setBriefInput(""); setBriefFormats(""); setBriefCampaign("");
+    setNavExpanded(false);
+  };
+
+  const addClient = () => {
+    if (!newClientName.trim()) return;
+    const id = "c_" + Date.now();
+    const code = (newClientCode.trim() || newClientName.slice(0, 2)).toUpperCase();
+    const newDb = { ...db, clients: { ...db.clients, [id]: { id, name: newClientName.trim(), code, brand: { ...EMPTY_BRAND } } } };
+    setDb(newDb); persist(newDb);
+    setNewClientName(""); setNewClientCode("");
+    setShowAddClient(false); selectClient(id);
+  };
+
+  const saveBrand = () => {
+    if (!activeClient) return;
+    const newDb = { ...db, clients: { ...db.clients, [activeClient]: { ...db.clients[activeClient], brand } } };
+    setDb(newDb); persist(newDb);
+    setSaveMsg("Saved"); setTimeout(() => setSaveMsg(""), 2500);
+  };
+
+  const addColour = () => {
+    setBrand(b => ({ ...b, colours: [...(b.colours || []), { hex: colourHex, label: colourLabel || "Colour" }] }));
+    setColourLabel("");
+  };
+
+  const removeColour = (i) => setBrand(b => ({ ...b, colours: b.colours.filter((_, idx) => idx !== i) }));
+
+  const clientBriefs = activeClient
+    ? Object.values(db.briefs[activeClient] || {}).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    : [];
+
+  const filteredBriefs = clientBriefs.filter(b =>
+    !historySearch || (b.campaign + b.rawBrief + b.formats).toLowerCase().includes(historySearch.toLowerCase())
+  );
+
+  const runAnalysis = async () => {
+    if (!briefInput.trim()) return;
+    setAnalysing(true); setResult(null);
+    setAnalysisStep("Reading brand context…");
+    const b = brand;
+    const c = db.clients[activeClient];
+    const colourStr = (b.colours || []).map(x => `${x.label}: ${x.hex}`).join(", ");
+    let histCtx = "";
+    if (wantHistory && clientBriefs.length > 0) {
+      histCtx = "\n\nPAST BRIEFS (inform current analysis):\n" +
+        clientBriefs.slice(0, 4).map(br => `• ${br.campaign || "Untitled"} [${br.formats || "?"}] ${new Date(br.createdAt).toLocaleDateString("en-GB")}: ${(br.scamp || "").slice(0, 160)}`).join("\n");
+    }
+    setAnalysisStep("Analysing against brand guidelines…");
+    const system = `You are a senior creative strategist at an advertising agency. You write exceptional, complete creative briefs.
+CLIENT: ${c.name}
+BRAND PROFILE:
+${b.description ? "Positioning: " + b.description : ""}
+${b.audience ? "Audience: " + b.audience : ""}
+${b.messages ? "Mandatory copy: " + b.messages : ""}
+${colourStr ? "Brand colours: " + colourStr : ""}
+${b.fontDisplay ? "Display font: " + b.fontDisplay : ""}
+${b.fontBody ? "Body font: " + b.fontBody : ""}
+${b.fontNotes ? "Font rules: " + b.fontNotes : ""}
+${b.logoRules ? "Logo rules: " + b.logoRules : ""}
+${b.ctaStyle ? "CTA style: " + b.ctaStyle : ""}
+${b.animRules ? "Animation rules: " + b.animRules : ""}
+${b.guidelines ? "Brand guidelines:\n" + b.guidelines : ""}
+${b.assetSummary ? "Typical creative formats:\n" + b.assetSummary : ""}
+${b.customPrompts ? "Always ask:\n" + b.customPrompts : ""}
+${histCtx}
+Reply ONLY with valid JSON. No markdown fences. Schema:
+{
+  "missing": ["question 1", ...],
+  "brandCheck": "2–3 paragraph brand alignment assessment",
+  "copy": "Headline 1:\\nHeadline 2:\\nHeadline 3:\\n\\nBody copy:\\n\\nCTA options:\\n\\nMandatory messaging notes:",
+  "scamp": "Detailed visual creative direction — layout, hierarchy, imagery, colour usage, typography, mood, animation notes if applicable.",
+  "fullBrief": "Complete formatted brief ready for any designer. Include all sections: Client | Objective | Audience | Formats | Headline | Body | CTA | Visual direction | Brand notes | Animation specs | Delivery.",
+  "wireframeSVG": ${wantWireframe ? `"SVG wireframe of the main ad layout. viewBox='0 0 340 480'. Only rect/text/line elements. Image zones: fill=#ebebeb stroke=#ccc stroke-dasharray=4. Text blocks: fill=#e2e2e2. CTA: fill=#ddd rx=4. Labels: fill=#888 font-size=11 font-family=sans-serif. Borders: stroke=#d0d0d0. Show real layout structure with labelled zones."` : "null"}
+}`;
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 4000,
+          system,
+          messages: [{ role: "user", content: `Analyse:\n\n${briefInput}${briefFormats ? "\nFormats: " + briefFormats : ""}${briefCampaign ? "\nCampaign: " + briefCampaign : ""}` }]
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const text = data.content?.map(i => i.text || "").join("") || "";
+      let parsed;
+      try { parsed = JSON.parse(text.replace(/```json|```/g, "").trim()); }
+      catch { parsed = { missing: [], brandCheck: text, copy: "", scamp: text, fullBrief: text, wireframeSVG: null }; }
+      setResult(parsed); setAnalysisStep(""); setBriefTab("output");
+    } catch (e) { setAnalysisStep("Error: " + e.message); }
+    setAnalysing(false);
+  };
+
+  const saveToHistory = () => {
+    if (!result || !activeClient) return;
+    const id = "b_" + Date.now();
+    const record = { id, campaign: briefCampaign, formats: briefFormats, rawBrief: briefInput, createdAt: new Date().toISOString(), missing: result.missing, brandCheck: result.brandCheck, copy: result.copy, scamp: result.scamp, fullBrief: result.fullBrief, wireframeSVG: result.wireframeSVG };
+    const map = { ...(db.briefs[activeClient] || {}), [id]: record };
+    const newDb = { ...db, briefs: { ...db.briefs, [activeClient]: map } };
+    setDb(newDb); persist(newDb);
+    setSaveMsg("Saved to history"); setTimeout(() => setSaveMsg(""), 2500);
+  };
+
+  const downloadBrief = () => {
+    if (!result) return;
+    const c = db.clients[activeClient];
+    const content = [
+      `CREATIVE BRIEF — ${c.name.toUpperCase()}`,
+      `Campaign: ${briefCampaign || "Untitled"}  |  Formats: ${briefFormats || "TBC"}  |  Date: ${new Date().toLocaleDateString("en-GB")}`,
+      "", "─".repeat(60), "MISSING INFO", "─".repeat(60),
+      (result.missing || []).map(q => "→ " + q).join("\n") || "Brief complete.",
+      "", "─".repeat(60), "BRAND ALIGNMENT", "─".repeat(60), result.brandCheck || "",
+      "", "─".repeat(60), "COPY & MESSAGING", "─".repeat(60), result.copy || "",
+      "", "─".repeat(60), "VISUAL SCAMP", "─".repeat(60), result.scamp || "",
+      "", "─".repeat(60), "FULL BRIEF", "─".repeat(60), result.fullBrief || ""
+    ].join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
+    a.download = `OpenBriefs_${(c.name || "").replace(/\s+/g, "_")}_${briefCampaign || Date.now()}.txt`;
+    a.click();
+  };
+
+  const cc = activeClient ? db.clients[activeClient] : null;
+  const accent = "#E8622A";
+
+  const css = `
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #F2F2F2; }
+    .ob-root { display: flex; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; background: #F2F2F2; color: #1A1A1A; overflow: hidden; }
+    .ob-rail { width: 64px; background: #F2F2F2; display: flex; flex-direction: column; align-items: center; padding: 14px 0; gap: 4px; flex-shrink: 0; border-right: 1px solid #E4E4E4; }
+    .ob-rail-top { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 1; }
+    .ob-brand-icon { width: 40px; height: 40px; background: #1A1A1A; border-radius: 10px; display: flex; align-items: center; justify-content: center; margin-bottom: 16px; flex-shrink: 0; }
+    .ob-rail-btn { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; cursor: pointer; border: none; background: transparent; color: #999; transition: background 0.15s, color 0.15s; position: relative; }
+    .ob-rail-btn:hover { background: #E8E8E8; color: #555; }
+    .ob-rail-btn.active { background: #1A1A1A; color: #fff; }
+    .ob-rail-btn.client-dot::after { content: ''; position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: ${accent}; }
+    .ob-rail-tooltip { position: absolute; left: 52px; top: 50%; transform: translateY(-50%); background: #1A1A1A; color: #fff; font-size: 11px; font-weight: 500; padding: 4px 9px; border-radius: 5px; white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 99; }
+    .ob-rail-btn:hover .ob-rail-tooltip { opacity: 1; }
+    .ob-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .ob-topbar { background: #F2F2F2; padding: 18px 28px 14px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    .ob-topbar-left h1 { font-size: 15px; font-weight: 600; color: #1A1A1A; letter-spacing: -0.01em; }
+    .ob-topbar-left p { font-size: 12px; color: #999; margin-top: 1px; }
+    .ob-content { flex: 1; overflow-y: auto; padding: 0 24px 32px; }
+    .ob-drop-zone { background: #EBEBEB; border-radius: 14px; padding: 80px 40px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; cursor: pointer; transition: background 0.15s; min-height: 320px; }
+    .ob-drop-zone:hover { background: #E4E4E4; }
+    .ob-drop-icon { width: 64px; height: 64px; background: #fff; border-radius: 14px; display: flex; align-items: center; justify-content: center; margin-bottom: 20px; }
+    .ob-drop-title { font-size: 20px; font-weight: 700; color: #1A1A1A; margin-bottom: 8px; letter-spacing: -0.02em; }
+    .ob-drop-sub { font-size: 14px; color: #888; line-height: 1.6; max-width: 360px; }
+    .ob-drop-sub strong { color: #555; }
+    .ob-field { margin-bottom: 14px; }
+    .ob-label { font-size: 12px; font-weight: 500; color: #888; margin-bottom: 5px; display: block; }
+    .ob-input { width: 100%; padding: 9px 11px; border: 1px solid #E8E8E8; border-radius: 8px; font-size: 13px; color: #1A1A1A; background: #FAFAFA; outline: none; font-family: inherit; transition: border-color 0.15s; }
+    .ob-input:focus { border-color: #C8C8C8; background: #fff; }
+    .ob-textarea { width: 100%; padding: 9px 11px; border: 1px solid #E8E8E8; border-radius: 8px; font-size: 13px; color: #1A1A1A; background: #FAFAFA; outline: none; font-family: inherit; resize: vertical; line-height: 1.6; transition: border-color 0.15s; }
+    .ob-textarea:focus { border-color: #C8C8C8; background: #fff; }
+    .ob-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .ob-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid #E0E0E0; background: #fff; color: #1A1A1A; font-family: inherit; transition: background 0.12s; }
+    .ob-btn:hover { background: #F5F5F5; }
+    .ob-btn-primary { background: #1A1A1A; color: #fff; border-color: #1A1A1A; }
+    .ob-btn-primary:hover { background: #333; }
+    .ob-btn-primary:disabled { background: #999; border-color: #999; cursor: not-allowed; }
+    .ob-btn-accent { background: ${accent}; color: #fff; border-color: ${accent}; }
+    .ob-btn-accent:hover { background: #d4541f; }
+    .ob-btn-accent:disabled { background: #f0a080; border-color: #f0a080; cursor: not-allowed; }
+    .ob-divider { height: 1px; background: #F0F0F0; margin: 4px 0; }
+    .ob-warn { background: #FFF8F5; border: 1px solid #F5D5C5; border-radius: 12px; overflow: hidden; margin-bottom: 16px; }
+    .ob-warn-hd { padding: 11px 16px; background: #FDF1EC; border-bottom: 1px solid #F5D5C5; font-size: 13px; font-weight: 600; color: #C04A10; display: flex; align-items: center; gap: 7px; }
+    .ob-warn-body { padding: 12px 16px; }
+    .ob-missing-q { display: flex; gap: 9px; padding: 7px 0; border-bottom: 1px solid #F5EEE9; font-size: 13px; color: #444; line-height: 1.5; }
+    .ob-missing-q:last-child { border-bottom: none; }
+    .ob-missing-arrow { color: ${accent}; font-weight: 600; flex-shrink: 0; }
+    .ob-result-panel { background: #fff; border-radius: 14px; padding: 18px 20px; margin-bottom: 14px; border: 1px solid #ECECEC; }
+    .ob-result-title { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #aaa; margin-bottom: 10px; }
+    .ob-result-text { font-size: 13px; line-height: 1.75; white-space: pre-wrap; color: #2A2A2A; }
+    .ob-scamp-text { font-size: 13px; line-height: 1.8; white-space: pre-wrap; color: #555; background: #FAFAFA; border: 1px solid #ECECEC; border-radius: 8px; padding: 13px 15px; }
+    .ob-mono-text { font-size: 12px; line-height: 1.9; white-space: pre-wrap; color: #666; background: #FAFAFA; border: 1px solid #ECECEC; border-radius: 8px; padding: 13px 15px; font-family: 'SF Mono', 'Fira Code', monospace; }
+    .ob-history-card { background: #fff; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; border: 1px solid #ECECEC; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
+    .ob-history-card:hover { border-color: #D0D0D0; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+    .ob-h-title { font-size: 14px; font-weight: 600; color: #1A1A1A; margin-bottom: 3px; letter-spacing: -0.01em; }
+    .ob-h-meta { font-size: 12px; color: #aaa; display: flex; gap: 10px; margin-bottom: 5px; }
+    .ob-h-excerpt { font-size: 12px; color: #888; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .ob-badge { font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 20px; background: #F2F2F2; color: #888; white-space: nowrap; }
+    .ob-swatch-wrap { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; min-height: 32px; align-items: center; }
+    .ob-swatch { width: 32px; height: 32px; border-radius: 7px; position: relative; cursor: pointer; border: 1px solid rgba(0,0,0,0.08); flex-shrink: 0; }
+    .ob-swatch-rm { position: absolute; top: -5px; right: -5px; width: 14px; height: 14px; background: #fff; border: 1px solid #ddd; border-radius: 50%; font-size: 9px; display: none; align-items: center; justify-content: center; cursor: pointer; color: #888; }
+    .ob-swatch:hover .ob-swatch-rm { display: flex; }
+    .ob-check-row { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: #555; }
+    .ob-check-row input { width: 14px; height: 14px; accent-color: ${accent}; cursor: pointer; }
+    .ob-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 200; backdrop-filter: blur(3px); }
+    .ob-modal { background: #fff; border-radius: 18px; padding: 28px 30px; width: 100%; max-width: 420px; box-shadow: 0 8px 48px rgba(0,0,0,0.12); }
+    .ob-modal-wide { background: #fff; border-radius: 18px; padding: 28px 30px; width: 100%; max-width: 680px; max-height: 82vh; overflow-y: auto; box-shadow: 0 8px 48px rgba(0,0,0,0.12); }
+    .ob-modal-title { font-size: 17px; font-weight: 700; color: #1A1A1A; margin-bottom: 20px; letter-spacing: -0.02em; }
+    .ob-modal-ft { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; padding-top: 16px; border-top: 1px solid #F0F0F0; }
+    .ob-client-list { padding: 8px 12px; }
+    .ob-client-pill { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 9px; cursor: pointer; border: none; background: transparent; width: 100%; text-align: left; transition: background 0.12s; font-family: inherit; color: #444; font-size: 13px; margin-bottom: 2px; }
+    .ob-client-pill:hover { background: #F5F5F5; }
+    .ob-client-pill.active { background: #1A1A1A; color: #fff; }
+    .ob-client-av { width: 26px; height: 26px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; background: #EBEBEB; color: #666; }
+    .ob-client-pill.active .ob-client-av { background: rgba(255,255,255,0.15); color: rgba(255,255,255,0.9); }
+    .ob-clients-dropdown { position: absolute; left: 52px; top: 0; background: #fff; border: 1px solid #E4E4E4; border-radius: 14px; min-width: 200px; box-shadow: 0 4px 24px rgba(0,0,0,0.1); z-index: 90; overflow: hidden; padding: 8px 0; }
+    .ob-progress { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #999; padding: 6px 0; }
+    .ob-dot { width: 5px; height: 5px; border-radius: 50%; background: ${accent}; animation: pulse 1.3s ease-in-out infinite; }
+    .ob-dot:nth-child(2) { animation-delay: 0.2s; }
+    .ob-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse { 0%,80%,100%{opacity:0.3;transform:scale(0.8)}40%{opacity:1;transform:scale(1)} }
+    .ob-wireframe-wrap { background: #FAFAFA; border: 1px solid #ECECEC; border-radius: 10px; padding: 16px; overflow-x: auto; display: flex; justify-content: center; }
+    .ob-footer { text-align: center; padding: 20px 0 10px; }
+    .ob-footer p { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: #C0C0C0; margin-bottom: 6px; }
+    .ob-footer-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #999; }
+    .ob-footer-dot { width: 10px; height: 10px; background: #D4FF00; border-radius: 3px; }
+    .ob-tab-row { display: flex; gap: 2px; padding: 0 4px 6px; }
+    .ob-tab { padding: 6px 14px; border-radius: 7px; font-size: 13px; font-weight: 500; cursor: pointer; border: none; background: transparent; color: #999; font-family: inherit; transition: all 0.12s; }
+    .ob-tab:hover { color: #555; background: #F5F5F5; }
+    .ob-tab.active { background: #1A1A1A; color: #fff; }
+  `;
+
+  const NavIcon = ({ icon, label, id, onClick, hasDot }) => {
+    const isActive = view === id;
+    const icons = {
+      users: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+      palette: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.47-1.125-.29-.289-.47-.688-.47-1.125a1.64 1.64 0 0 1 1.648-1.648h1.93c3.243 0 5.712-2.654 5.712-5.71C22 6.054 17.523 2 12 2z"/></svg>,
+      pencil: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+      clock: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+    };
+    return (
+      <button className={`ob-rail-btn${isActive ? " active" : ""}${hasDot ? " client-dot" : ""}`} onClick={onClick || (() => id && setView(id))} aria-label={label}>
+        {icons[icon]}
+        <span className="ob-rail-tooltip">{label}</span>
+      </button>
+    );
+  };
+
+  return (
+    <>
+      <style>{css}</style>
+      <div className="ob-root">
+        <aside className="ob-rail">
+          <div className="ob-brand-icon">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <rect x="3" y="2" width="11" height="14" rx="2" stroke="#fff" strokeWidth="1.5"/>
+              <path d="M6 6h5M6 9h5M6 12h3" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/>
+              <rect x="9" y="9" width="10" height="11" rx="2" fill="#E8622A"/>
+              <path d="M12 13h4M12 16h2" stroke="#fff" strokeWidth="1.3" strokeLinecap="round"/>
+            </svg>
+          </div>
+          <div className="ob-rail-top">
+            <div style={{ position: "relative" }}>
+              <NavIcon icon="users" label="Clients" id="clients" hasDot={!!activeClient} onClick={() => setNavExpanded(v => !v)} />
+              {navExpanded && (
+                <div className="ob-clients-dropdown">
+                  <div style={{ padding: "8px 14px 4px", fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "#bbb" }}>Clients</div>
+                  <div className="ob-client-list">
+                    {clients.map(c => (
+                      <button key={c.id} className={`ob-client-pill${activeClient === c.id ? " active" : ""}`} onClick={() => selectClient(c.id)}>
+                        <div className="ob-client-av">{c.code}</div>
+                        <span>{c.name}</span>
+                      </button>
+                    ))}
+                    <button className="ob-client-pill" onClick={() => { setShowAddClient(true); setNavExpanded(false); }}>
+                      <div className="ob-client-av" style={{ background: "#F0F0F0" }}>+</div>
+                      <span style={{ color: "#999" }}>Add client</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            {activeClient && <>
+              <NavIcon icon="palette" label="Brand setup" id="brand" />
+              <NavIcon icon="pencil" label="New brief" id="brief" />
+              <NavIcon icon="clock" label="Brief history" id="history" />
+            </>}
+          </div>
+        </aside>
+
+        <div className="ob-main">
+          <header className="ob-topbar">
+            <div className="ob-topbar-left">
+              <h1>{cc ? cc.name : "Open Briefs"}</h1>
+              <p>{!activeClient ? "Select a client to begin" : view === "brand" ? "Brand setup" : view === "brief" ? "Brief analysis" : "Brief history"}</p>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {saveMsg && <span style={{ fontSize: 13, color: "#3A9B5C", fontWeight: 500 }}>{saveMsg}</span>}
+              {view === "brand" && activeClient && <button className="ob-btn ob-btn-primary" onClick={saveBrand}>Save brand</button>}
+            </div>
+          </header>
+
+          <div className="ob-content">
+            {/* WELCOME */}
+            {!activeClient && (
+              <div style={{ padding: "12px 0" }}>
+                <div style={{ background: "#EBEBEB", borderRadius: 14 }}>
+                  <div className="ob-drop-zone" onClick={() => setShowAddClient(true)}>
+                    <div className="ob-drop-icon">
+                      <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><path d="M14 6v16M6 14h16" stroke={accent} strokeWidth="2" strokeLinecap="round"/></svg>
+                    </div>
+                    <div className="ob-drop-title">Open Briefs</div>
+                    <p className="ob-drop-sub">Add your first client to begin. Set up brand guidelines once, then every brief gets reviewed, questioned, and turned into a <strong>complete designer-ready document.</strong></p>
+                  </div>
+                </div>
+                <div className="ob-footer">
+                  <p>Built for creative agencies</p>
+                  <div className="ob-footer-badge"><div className="ob-footer-dot"></div>Powered by Claude</div>
+                </div>
+              </div>
+            )}
+
+            {/* BRAND SETUP */}
+            {activeClient && view === "brand" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div className="ob-grid2">
+                  <div className="ob-result-panel">
+                    <div className="ob-result-title">Brand identity</div>
+                    <div className="ob-field"><label className="ob-label">Positioning / tone of voice</label><textarea className="ob-textarea" rows={3} value={brand.description} onChange={e => setBrand(b => ({ ...b, description: e.target.value }))} placeholder="Who is this brand, what do they stand for, what's the tone?" /></div>
+                    <div className="ob-field"><label className="ob-label">Target audience</label><textarea className="ob-textarea" rows={2} value={brand.audience} onChange={e => setBrand(b => ({ ...b, audience: e.target.value }))} placeholder="Age, mindset, behaviours, motivations..." /></div>
+                    <div className="ob-field"><label className="ob-label">Mandatory messaging</label><textarea className="ob-textarea" rows={2} value={brand.messages} onChange={e => setBrand(b => ({ ...b, messages: e.target.value }))} placeholder="Taglines, legal copy, phrases that must always appear..." /></div>
+                  </div>
+                  <div className="ob-result-panel">
+                    <div className="ob-result-title">Brand colours</div>
+                    <div className="ob-swatch-wrap">
+                      {(brand.colours || []).map((c, i) => (
+                        <div key={i} className="ob-swatch" style={{ background: c.hex }} title={`${c.label} ${c.hex}`}>
+                          <button className="ob-swatch-rm" onClick={() => removeColour(i)}>×</button>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                      <input type="color" value={colourHex} onChange={e => setColourHex(e.target.value)} style={{ width: 36, height: 34, padding: 2, border: "1px solid #E8E8E8", borderRadius: 7, cursor: "pointer", background: "#FAFAFA" }} />
+                      <input className="ob-input" style={{ width: 88 }} value={colourHex} onChange={e => setColourHex(e.target.value)} placeholder="#E8622A" />
+                      <input className="ob-input" style={{ flex: 1 }} value={colourLabel} onChange={e => setColourLabel(e.target.value)} placeholder="Label e.g. Primary" />
+                      <button className="ob-btn" onClick={addColour}>Add</button>
+                    </div>
+                    <div className="ob-divider" style={{ margin: "14px 0" }} />
+                    <div className="ob-result-title">Typography</div>
+                    <div className="ob-grid2">
+                      <div className="ob-field"><label className="ob-label">Display font</label><input className="ob-input" value={brand.fontDisplay} onChange={e => setBrand(b => ({ ...b, fontDisplay: e.target.value }))} placeholder="e.g. Telegraf Bold" /></div>
+                      <div className="ob-field"><label className="ob-label">Body font</label><input className="ob-input" value={brand.fontBody} onChange={e => setBrand(b => ({ ...b, fontBody: e.target.value }))} placeholder="e.g. DM Sans" /></div>
+                    </div>
+                    <div className="ob-field"><label className="ob-label">Font usage rules</label><textarea className="ob-textarea" rows={2} value={brand.fontNotes} onChange={e => setBrand(b => ({ ...b, fontNotes: e.target.value }))} placeholder="Headlines uppercase? Minimum sizes? CTA always bold?" /></div>
+                  </div>
+                </div>
+
+                <div className="ob-grid2">
+                  <div className="ob-result-panel">
+                    <div className="ob-result-title">Logo, CTA & animation</div>
+                    <div className="ob-field"><label className="ob-label">Logo positioning</label><textarea className="ob-textarea" rows={2} value={brand.logoRules} onChange={e => setBrand(b => ({ ...b, logoRules: e.target.value }))} placeholder="e.g. Always top-left, 20px clear space, white version on dark only..." /></div>
+                    <div className="ob-field"><label className="ob-label">CTA style</label><textarea className="ob-textarea" rows={2} value={brand.ctaStyle} onChange={e => setBrand(b => ({ ...b, ctaStyle: e.target.value }))} placeholder="e.g. Pill shape, brand orange, white text, min 44px height..." /></div>
+                    <div className="ob-field"><label className="ob-label">Animation rules</label><textarea className="ob-textarea" rows={2} value={brand.animRules} onChange={e => setBrand(b => ({ ...b, animRules: e.target.value }))} placeholder="e.g. Max 15s, must loop, logo hold at end, no flash >3Hz..." /></div>
+                  </div>
+                  <div className="ob-result-panel">
+                    <div className="ob-result-title">Client-specific brief questions</div>
+                    <div className="ob-field"><label className="ob-label">Questions always asked for this client</label><textarea className="ob-textarea" rows={7} value={brand.customPrompts} onChange={e => setBrand(b => ({ ...b, customPrompts: e.target.value }))} placeholder={"For Autotrader:\n— What car make/model?\n— Price point?\n— UK road or driveway background?\n— Plate year?\n— Static or animated?\n— How many frames?"} /></div>
+                  </div>
+                </div>
+
+                <div className="ob-result-panel">
+                  <div className="ob-result-title">Full brand guidelines</div>
+                  <textarea className="ob-textarea" rows={8} value={brand.guidelines} onChange={e => setBrand(b => ({ ...b, guidelines: e.target.value }))} placeholder="Paste brand guidelines — photography style, do's and don'ts, imagery direction, usage examples..." />
+                </div>
+
+                <div className="ob-result-panel">
+                  <div className="ob-result-title">Creative library description</div>
+                  <textarea className="ob-textarea" rows={4} value={brand.assetSummary} onChange={e => setBrand(b => ({ ...b, assetSummary: e.target.value }))} placeholder="e.g. Typical formats: 300x250, 728x90, 6-sheet OOH. Animations 10–15s..." />
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 12, paddingBottom: 8 }}>
+                  <button className="ob-btn ob-btn-primary" style={{ padding: "9px 20px", fontSize: 14 }} onClick={saveBrand}>Save brand setup</button>
+                  {saveMsg && <span style={{ fontSize: 13, color: "#3A9B5C", fontWeight: 500 }}>{saveMsg}</span>}
+                </div>
+              </div>
+            )}
+
+            {/* BRIEF */}
+            {activeClient && view === "brief" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div className="ob-result-panel">
+                  <div className="ob-tab-row" style={{ marginBottom: 14 }}>
+                    <button className={`ob-tab${briefTab === "brief" ? " active" : ""}`} onClick={() => setBriefTab("brief")}>Brief input</button>
+                    {result && <button className={`ob-tab${briefTab === "output" ? " active" : ""}`} onClick={() => setBriefTab("output")}>Analysis output</button>}
+                  </div>
+                  {briefTab === "brief" && <>
+                    <div className="ob-field"><label className="ob-label">Paste the incoming brief</label><textarea className="ob-textarea" rows={10} value={briefInput} onChange={e => setBriefInput(e.target.value)} placeholder="Drop the rough brief here. The worse it is, the more useful this tool becomes..." /></div>
+                    <div className="ob-grid2">
+                      <div className="ob-field"><label className="ob-label">Formats required</label><input className="ob-input" value={briefFormats} onChange={e => setBriefFormats(e.target.value)} placeholder="e.g. 300x250, 728x90, 6-sheet OOH" /></div>
+                      <div className="ob-field"><label className="ob-label">Campaign / project name</label><input className="ob-input" value={briefCampaign} onChange={e => setBriefCampaign(e.target.value)} placeholder="e.g. Summer Sale Q3 2025" /></div>
+                    </div>
+                    <div style={{ display: "flex", gap: 20, margin: "4px 0 16px" }}>
+                      <label className="ob-check-row"><input type="checkbox" checked={wantWireframe} onChange={e => setWantWireframe(e.target.checked)} /> Generate wireframe scamp</label>
+                      <label className="ob-check-row"><input type="checkbox" checked={wantHistory} onChange={e => setWantHistory(e.target.checked)} /> Inform from past briefs</label>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <button className="ob-btn ob-btn-accent" style={{ padding: "9px 20px", fontSize: 14 }} onClick={runAnalysis} disabled={analysing}>
+                        {analysing ? "Analysing…" : "Analyse & build brief"}
+                      </button>
+                      {analysisStep && <div className="ob-progress"><div className="ob-dot" /><div className="ob-dot" /><div className="ob-dot" /><span>{analysisStep}</span></div>}
+                    </div>
+                  </>}
+                </div>
+
+                {result && briefTab === "output" && (
+                  <>
+                    {result.missing?.length > 0 && (
+                      <div className="ob-warn">
+                        <div className="ob-warn-hd">⚠ Missing information — send these back to the briefer</div>
+                        <div className="ob-warn-body">
+                          {result.missing.map((q, i) => (
+                            <div key={i} className="ob-missing-q"><span className="ob-missing-arrow">→</span><span>{q}</span></div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="ob-grid2">
+                      <div className="ob-result-panel">
+                        <div className="ob-result-title">Brand alignment</div>
+                        <div className="ob-result-text">{result.brandCheck}</div>
+                      </div>
+                      <div className="ob-result-panel">
+                        <div className="ob-result-title">Copy & messaging</div>
+                        <div className="ob-result-text">{result.copy}</div>
+                      </div>
+                    </div>
+                    {wantWireframe && result.wireframeSVG && (
+                      <div className="ob-result-panel">
+                        <div className="ob-result-title">Wireframe scamp</div>
+                        <div className="ob-wireframe-wrap" dangerouslySetInnerHTML={{ __html: result.wireframeSVG }} />
+                      </div>
+                    )}
+                    <div className="ob-result-panel">
+                      <div className="ob-result-title">Creative direction</div>
+                      <div className="ob-scamp-text">{result.scamp}</div>
+                    </div>
+                    <div className="ob-result-panel">
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                        <div className="ob-result-title" style={{ margin: 0 }}>Complete brief document</div>
+                        <div style={{ display: "flex", gap: 7 }}>
+                          <button className="ob-btn" onClick={() => navigator.clipboard.writeText(result.fullBrief)}>Copy</button>
+                          <button className="ob-btn" onClick={downloadBrief}>Download .txt</button>
+                        </div>
+                      </div>
+                      <div className="ob-mono-text">{result.fullBrief}</div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, paddingBottom: 8 }}>
+                      <button className="ob-btn ob-btn-primary" style={{ padding: "9px 20px" }} onClick={saveToHistory}>🔖 Save to history</button>
+                      {saveMsg && <span style={{ fontSize: 13, color: "#3A9B5C", fontWeight: 500 }}>{saveMsg}</span>}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* HISTORY */}
+            {activeClient && view === "history" && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                  <h2 style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.01em" }}>Brief history</h2>
+                  <input className="ob-input" style={{ width: 210 }} placeholder="Search briefs…" value={historySearch} onChange={e => setHistorySearch(e.target.value)} />
+                </div>
+                {filteredBriefs.length === 0 ? (
+                  <div style={{ background: "#EBEBEB", borderRadius: 16, padding: "64px 32px", textAlign: "center" }}>
+                    <div style={{ fontSize: 32, marginBottom: 12 }}>🕐</div>
+                    <p style={{ fontSize: 14, fontWeight: 600, color: "#888", marginBottom: 5 }}>No briefs saved yet</p>
+                    <p style={{ fontSize: 13, color: "#aaa" }}>Analyse a brief and save it to build your history</p>
+                  </div>
+                ) : filteredBriefs.map(br => (
+                  <div key={br.id} className="ob-history-card" onClick={() => setViewingBrief(br)}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <div style={{ flex: 1 }}>
+                        <div className="ob-h-title">{br.campaign || "Untitled brief"}</div>
+                        <div className="ob-h-meta">
+                          <span>{new Date(br.createdAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}</span>
+                          {br.formats && <span>{br.formats}</span>}
+                          {br.missing?.length > 0 && <span style={{ color: accent }}>{br.missing.length} questions flagged</span>}
+                        </div>
+                        <div className="ob-h-excerpt">{br.scamp || br.rawBrief || ""}</div>
+                      </div>
+                      <div className="ob-badge" style={{ marginLeft: 10 }}>{br.formats?.split(",")[0]?.trim() || "Brief"}</div>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ADD CLIENT */}
+      {showAddClient && (
+        <div className="ob-overlay" onClick={e => e.target === e.currentTarget && setShowAddClient(false)}>
+          <div className="ob-modal">
+            <div className="ob-modal-title">Add new client</div>
+            <div className="ob-field"><label className="ob-label">Client / brand name</label><input className="ob-input" value={newClientName} onChange={e => setNewClientName(e.target.value)} placeholder="e.g. Autotrader" onKeyDown={e => e.key === "Enter" && addClient()} autoFocus /></div>
+            <div className="ob-field"><label className="ob-label">Short code (2 letters)</label><input className="ob-input" style={{ width: 90 }} value={newClientCode} onChange={e => setNewClientCode(e.target.value)} placeholder="AT" maxLength={2} onKeyDown={e => e.key === "Enter" && addClient()} /></div>
+            <div className="ob-modal-ft">
+              <button className="ob-btn" onClick={() => setShowAddClient(false)}>Cancel</button>
+              <button className="ob-btn ob-btn-primary" onClick={addClient}>Add client</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BRIEF DETAIL */}
+      {viewingBrief && (
+        <div className="ob-overlay" onClick={e => e.target === e.currentTarget && setViewingBrief(null)}>
+          <div className="ob-modal-wide">
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4, letterSpacing: "-0.02em" }}>{viewingBrief.campaign || "Untitled brief"}</div>
+            <div style={{ fontSize: 12, color: "#aaa", marginBottom: 22 }}>
+              {new Date(viewingBrief.createdAt).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}
+              {viewingBrief.formats ? " · " + viewingBrief.formats : ""}
+            </div>
+            {viewingBrief.missing?.length > 0 && <div style={{ marginBottom: 16 }}><div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "#bbb", marginBottom: 7 }}>Missing questions</div>{viewingBrief.missing.map((q, i) => <div key={i} style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>→ {q}</div>)}</div>}
+            {viewingBrief.wireframeSVG && <div style={{ marginBottom: 16 }}><div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "#bbb", marginBottom: 7 }}>Wireframe</div><div className="ob-wireframe-wrap" dangerouslySetInnerHTML={{ __html: viewingBrief.wireframeSVG }} /></div>}
+            {viewingBrief.scamp && <div style={{ marginBottom: 16 }}><div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "#bbb", marginBottom: 7 }}>Creative direction</div><div className="ob-scamp-text">{viewingBrief.scamp}</div></div>}
+            {viewingBrief.fullBrief && <div style={{ marginBottom: 8 }}><div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "#bbb", marginBottom: 7 }}>Full brief</div><div className="ob-mono-text">{viewingBrief.fullBrief}</div></div>}
+            <div className="ob-modal-ft">
+              <button className="ob-btn" onClick={() => setViewingBrief(null)}>Close</button>
+              <button className="ob-btn ob-btn-primary" onClick={() => { setBriefInput(viewingBrief.rawBrief || ""); setBriefFormats(viewingBrief.formats || ""); setBriefCampaign((viewingBrief.campaign || "") + " (revised)"); setViewingBrief(null); setView("brief"); setBriefTab("brief"); }}>Use as base for new brief →</button>
+            </div>
+          </div>
+        </div>    
+      )}
+    </>
+  );
+}
